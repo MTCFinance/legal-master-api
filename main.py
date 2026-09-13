@@ -12,11 +12,12 @@ from pydantic import BaseModel, Field
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 
 app = FastAPI(
     title="Legal Master API",
-    version="1.3.0",
+    version="1.4.0",
     description="API për Hartues Aktesh Juridike - Kosovë / ARBK",
     servers=[
         {
@@ -35,6 +36,8 @@ BASE_DIR = Path("/tmp/legal-master")
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 
 DOWNLOAD_TOKENS = {}
+
+ARBK_SEARCH_URL = "https://arbk.rks-gov.net/TableSearch"
 
 
 # =========================================================
@@ -103,23 +106,17 @@ class ARBKBusinessData(BaseModel):
     business_name: str
     trade_name: Optional[str] = None
     nui: str
-
     legal_form: Optional[str] = None
     business_status: Optional[str] = None
     registration_date: Optional[str] = None
-
     address: Optional[str] = None
     municipality: Optional[str] = None
-
     primary_activity: Optional[str] = None
     other_activities: List[str] = Field(default_factory=list)
-
     owners: List[ARBKPerson] = Field(default_factory=list)
     directors: List[ARBKPerson] = Field(default_factory=list)
-
     email: Optional[str] = None
     phone: Optional[str] = None
-
     source_url: Optional[str] = None
     verification_date: Optional[str] = None
 
@@ -136,6 +133,31 @@ def clean_filename(name: str) -> str:
         name = "dokument_juridik"
 
     return name[:100]
+
+
+def clean_text(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+
+    value = re.sub(r"\s+", " ", value).strip()
+
+    if not value:
+        return None
+
+    return value
+
+
+def find_first(patterns, text):
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            text,
+            flags=re.IGNORECASE | re.MULTILINE
+        )
+        if match:
+            return clean_text(match.group(1))
+
+    return None
 
 
 def create_word_document(
@@ -183,6 +205,319 @@ def create_word_document(
 
 
 # =========================================================
+# ARBK BROWSER HELPERS
+# =========================================================
+
+async def fill_arbk_nui(page, nui: str):
+    """
+    Provon disa mënyra për të identifikuar fushën NUI.
+    Kjo e bën kodin më rezistent ndaj ndryshimeve të vogla në HTML.
+    """
+
+    selectors = [
+        'input[placeholder*="Numri unik"]',
+        'input[placeholder*="numri i biznesit"]',
+        'input[name*="nui" i]',
+        'input[id*="nui" i]',
+        'input[name*="business" i]',
+        'input[id*="business" i]'
+    ]
+
+    for selector in selectors:
+        locator = page.locator(selector)
+
+        if await locator.count() > 0:
+            try:
+                await locator.first.fill(nui)
+                return True
+            except Exception:
+                pass
+
+    # Fallback: kërko input-et e dukshme.
+    inputs = page.locator("input")
+
+    count = await inputs.count()
+
+    for i in range(count):
+        item = inputs.nth(i)
+
+        try:
+            if not await item.is_visible():
+                continue
+
+            placeholder = (
+                await item.get_attribute("placeholder") or ""
+            ).lower()
+
+            name = (
+                await item.get_attribute("name") or ""
+            ).lower()
+
+            item_id = (
+                await item.get_attribute("id") or ""
+            ).lower()
+
+            combined = f"{placeholder} {name} {item_id}"
+
+            if (
+                "unik" in combined
+                or "nui" in combined
+                or "biznes" in combined
+            ):
+                await item.fill(nui)
+                return True
+
+        except Exception:
+            continue
+
+    return False
+
+
+async def click_arbk_search(page):
+    search_candidates = [
+        page.get_by_role(
+            "button",
+            name=re.compile("KËRKO|KERKO", re.IGNORECASE)
+        ),
+        page.locator(
+            'button:has-text("KËRKO")'
+        ),
+        page.locator(
+            'button:has-text("KERKO")'
+        ),
+        page.locator(
+            'input[type="submit"]'
+        )
+    ]
+
+    for locator in search_candidates:
+        try:
+            if await locator.count() > 0:
+                await locator.first.click()
+                return True
+        except Exception:
+            continue
+
+    return False
+
+
+def extract_public_arbk_data(
+    text: str,
+    nui: str
+):
+    """
+    Nxjerr vetëm atë që gjendet në tekstin publik të faqes.
+    Çdo fushë që nuk identifikohet mbetet None.
+    """
+
+    normalized = re.sub(r"[ \t]+", " ", text)
+
+    # Status
+    business_status = find_first(
+        [
+            r"\bStatusi\b\s*:?\s*(Aktiv|Pasiv)",
+            r"\b(Aktiv|Pasiv)\b"
+        ],
+        normalized
+    )
+
+    # Forma juridike
+    legal_form = find_first(
+        [
+            (
+                r"(Shoqëri\s+me\s+përgjegjësi\s+"
+                r"të\s+kufizuar)"
+            ),
+            r"\b(SH\.?P\.?K\.?)\b",
+            r"(Shoqëri\s+Aksionare)",
+            r"\b(SH\.?A\.?)\b",
+            r"(Biznes\s+Individual)"
+        ],
+        normalized
+    )
+
+    # Email
+    email_match = re.search(
+        r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b",
+        text,
+        re.IGNORECASE
+    )
+
+    email = (
+        email_match.group(0)
+        if email_match
+        else None
+    )
+
+    # Telefon
+    phone = find_first(
+        [
+            (
+                r"(?:Telefon|Telefoni|Tel\.?)\s*:?\s*"
+                r"(\+?\d[\d\s\-\/]{6,20})"
+            )
+        ],
+        normalized
+    )
+
+    # Komuna
+    municipality = find_first(
+        [
+            r"(?:Komuna)\s*:?\s*([A-Za-zÇËçë\s\-]+)",
+        ],
+        normalized
+    )
+
+    # Data e regjistrimit
+    registration_date = find_first(
+        [
+            (
+                r"(?:Themeluar|Regjistruar|"
+                r"Data e regjistrimit)\s*:?\s*"
+                r"(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{4})"
+            )
+        ],
+        normalized
+    )
+
+    # Adresa
+    address = find_first(
+        [
+            (
+                r"(?:Adresa|Selia)\s*:?\s*"
+                r"(.{3,120}?)(?:\n|Komuna|Telefon|Email|$)"
+            )
+        ],
+        text
+    )
+
+    # Emri i biznesit:
+    # Fillimisht kërkojmë rreshtat pranë NUI.
+    business_name = None
+
+    lines = [
+        clean_text(line)
+        for line in text.splitlines()
+        if clean_text(line)
+    ]
+
+    for index, line in enumerate(lines):
+        if nui in line:
+            nearby = lines[
+                max(0, index - 4):
+                min(len(lines), index + 5)
+            ]
+
+            for candidate in nearby:
+                if (
+                    candidate
+                    and candidate != nui
+                    and len(candidate) <= 150
+                    and not candidate.lower().startswith(
+                        (
+                            "rezultatet",
+                            "pronari",
+                            "përfaqësues",
+                            "komuna",
+                            "status"
+                        )
+                    )
+                ):
+                    if (
+                        "sh.p.k" in candidate.lower()
+                        or "shpk" in candidate.lower()
+                        or "sh.a" in candidate.lower()
+                        or "biznes" not in candidate.lower()
+                    ):
+                        business_name = candidate
+                        break
+
+        if business_name:
+            break
+
+    # Pronaret / perfaqesuesit - best effort.
+    owners = []
+    directors = []
+
+    owner_section = re.search(
+        (
+            r"PRONAR[ËE]T?(.*?)(?:"
+            r"P[ËE]RFAQ[ËE]SUES|BORDI|$)"
+        ),
+        text,
+        re.IGNORECASE | re.DOTALL
+    )
+
+    if owner_section:
+        owner_text = owner_section.group(1)
+
+        owner_lines = [
+            clean_text(x)
+            for x in owner_text.splitlines()
+            if clean_text(x)
+        ]
+
+        for item in owner_lines[:10]:
+            if (
+                len(item) >= 3
+                and not re.fullmatch(r"\d+", item)
+            ):
+                owners.append(
+                    {
+                        "full_name": item,
+                        "role": "Pronar"
+                    }
+                )
+
+    representative_section = re.search(
+        (
+            r"P[ËE]RFAQ[ËE]SUES(?:IT)?(.*?)(?:"
+            r"BORDI|PRONAR[ËE]T|$)"
+        ),
+        text,
+        re.IGNORECASE | re.DOTALL
+    )
+
+    if representative_section:
+        rep_text = representative_section.group(1)
+
+        rep_lines = [
+            clean_text(x)
+            for x in rep_text.splitlines()
+            if clean_text(x)
+        ]
+
+        for item in rep_lines[:10]:
+            if (
+                len(item) >= 3
+                and not re.fullmatch(r"\d+", item)
+            ):
+                directors.append(
+                    {
+                        "full_name": item,
+                        "role": "Përfaqësues"
+                    }
+                )
+
+    return {
+        "business_name": business_name,
+        "trade_name": None,
+        "nui": nui,
+        "legal_form": legal_form,
+        "business_status": business_status,
+        "registration_date": registration_date,
+        "address": address,
+        "municipality": municipality,
+        "primary_activity": None,
+        "other_activities": [],
+        "owners": owners,
+        "directors": directors,
+        "email": email,
+        "phone": phone
+    }
+
+
+# =========================================================
 # ROOT
 # =========================================================
 
@@ -194,7 +529,7 @@ def root():
     return {
         "service": "Legal Master API",
         "status": "running",
-        "version": "1.3.0"
+        "version": "1.4.0"
     }
 
 
@@ -231,7 +566,9 @@ def validate_business(data: BusinessRequest):
         issues.append("Mungon emri i biznesit")
 
     if data.capital is not None and data.capital < 0:
-        issues.append("Kapitali nuk mund të jetë negativ")
+        issues.append(
+            "Kapitali nuk mund të jetë negativ"
+        )
 
     if data.employees is not None and data.employees < 0:
         issues.append(
@@ -246,7 +583,148 @@ def validate_business(data: BusinessRequest):
 
 
 # =========================================================
-# ARBK PUBLIC DATA VERIFICATION
+# ARBK INDIVIDUAL PUBLIC LOOKUP
+# =========================================================
+
+@app.get(
+    "/arbk/lookup/{nui}",
+    operation_id="lookup_arbk_business",
+    dependencies=[Depends(verify_api_key)]
+)
+async def lookup_arbk_business(nui: str):
+
+    nui = re.sub(r"\D", "", nui)
+
+    if not nui:
+        raise HTTPException(
+            status_code=400,
+            detail="NUI nuk është valid"
+        )
+
+    async with async_playwright() as playwright:
+
+        browser = None
+
+        try:
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage"
+                ]
+            )
+
+            page = await browser.new_page(
+                viewport={
+                    "width": 1440,
+                    "height": 1000
+                }
+            )
+
+            await page.goto(
+                ARBK_SEARCH_URL,
+                wait_until="domcontentloaded",
+                timeout=60000
+            )
+
+            await page.wait_for_timeout(2500)
+
+            filled = await fill_arbk_nui(
+                page,
+                nui
+            )
+
+            if not filled:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Nuk u identifikua fusha NUI "
+                        "në faqen publike të ARBK-së"
+                    )
+                )
+
+            searched = await click_arbk_search(page)
+
+            if not searched:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Nuk u identifikua butoni KËRKO "
+                        "në faqen publike të ARBK-së"
+                    )
+                )
+
+            try:
+                await page.wait_for_load_state(
+                    "networkidle",
+                    timeout=20000
+                )
+            except PlaywrightTimeoutError:
+                pass
+
+            await page.wait_for_timeout(3000)
+
+            body_text = await page.locator(
+                "body"
+            ).inner_text()
+
+            if nui not in body_text:
+                return {
+                    "found": False,
+                    "nui": nui,
+                    "source": ARBK_SEARCH_URL,
+                    "message": (
+                        "Nuk u gjet subjekt publik "
+                        "me këtë NUI në rezultatin e ARBK-së."
+                    )
+                }
+
+            extracted = extract_public_arbk_data(
+                body_text,
+                nui
+            )
+
+            return {
+                "found": True,
+                "source": ARBK_SEARCH_URL,
+                "data": extracted,
+                "raw_public_text": body_text[:12000],
+                "note": (
+                    "Të dhënat janë lexuar nga rezultati "
+                    "publik për këtë NUI. Fushat që nuk "
+                    "u identifikuan publikisht mbeten null "
+                    "ose lista boshe. Nuk janë shpikur të dhëna."
+                )
+            }
+
+        except HTTPException:
+            raise
+
+        except PlaywrightTimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    "Faqja e ARBK-së nuk u përgjigj "
+                    "brenda afatit të lejuar"
+                )
+            )
+
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Gabim gjatë leximit të faqes publike "
+                    f"të ARBK-së: {str(exc)}"
+                )
+            )
+
+        finally:
+            if browser:
+                await browser.close()
+
+
+# =========================================================
+# MANUAL ARBK DATA VERIFICATION
 # =========================================================
 
 @app.post(
@@ -294,61 +772,16 @@ def verify_arbk_business(data: ARBKBusinessData):
             "Nuk janë dhënë pronarët/anëtarët"
         )
 
-    if data.email is None:
-        warnings.append(
-            "Emaili nuk është publik ose nuk është dhënë"
-        )
-
-    if data.phone is None:
-        warnings.append(
-            "Telefoni nuk është publik ose nuk është dhënë"
-        )
-
-    normalized = {
-        "business_name": data.business_name.strip(),
-        "trade_name": data.trade_name,
-        "nui": data.nui.strip(),
-        "legal_form": data.legal_form,
-        "business_status": data.business_status,
-        "registration_date": data.registration_date,
-        "address": data.address,
-        "municipality": data.municipality,
-        "primary_activity": data.primary_activity,
-        "other_activities": data.other_activities,
-        "owners": [
-            person.model_dump()
-            for person in data.owners
-        ],
-        "directors": [
-            person.model_dump()
-            for person in data.directors
-        ],
-        "email": data.email,
-        "phone": data.phone,
-        "source_url": data.source_url,
-        "verification_date": data.verification_date
-    }
-
     return {
         "valid": len(critical_issues) == 0,
-        "status": (
-            "VERIFIED_DATA"
-            if len(critical_issues) == 0
-            else "INCOMPLETE_DATA"
-        ),
         "critical_issues": critical_issues,
         "warnings": warnings,
-        "business": normalized,
-        "note": (
-            "Përdoren vetëm të dhënat publike të dhëna "
-            "nga burimi ARBK. Të dhënat që nuk publikohen "
-            "nuk duhet të supozohen ose shpiken."
-        )
+        "business": data.model_dump()
     }
 
 
 # =========================================================
-# WORD DOCUMENT GENERATION
+# DOCUMENT GENERATION
 # =========================================================
 
 @app.post(
@@ -371,7 +804,9 @@ def generate_document(data: DocumentRequest):
         )
 
     if data.filename:
-        base_filename = clean_filename(data.filename)
+        base_filename = clean_filename(
+            data.filename
+        )
     else:
         base_filename = clean_filename(
             f"{data.document_type}_{uuid4().hex[:8]}"
@@ -379,8 +814,13 @@ def generate_document(data: DocumentRequest):
 
     filename = f"{base_filename}.docx"
 
-    internal_name = f"{uuid4().hex}_{filename}"
-    output_path = BASE_DIR / internal_name
+    internal_name = (
+        f"{uuid4().hex}_{filename}"
+    )
+
+    output_path = (
+        BASE_DIR / internal_name
+    )
 
     create_word_document(
         data=data,
@@ -408,7 +848,7 @@ def generate_document(data: DocumentRequest):
 
 
 # =========================================================
-# TEMPORARY DOWNLOAD
+# DOWNLOAD
 # =========================================================
 
 @app.get(
@@ -422,15 +862,22 @@ def download_document(token: str):
     if not file_data:
         raise HTTPException(
             status_code=404,
-            detail="Dokumenti nuk ekziston ose linku ka skaduar"
+            detail=(
+                "Dokumenti nuk ekziston ose "
+                "linku ka skaduar"
+            )
         )
 
-    file_path = Path(file_data["path"])
+    file_path = Path(
+        file_data["path"]
+    )
 
     if not file_path.exists():
         raise HTTPException(
             status_code=404,
-            detail="Dokumenti nuk gjendet më në server"
+            detail=(
+                "Dokumenti nuk gjendet më në server"
+            )
         )
 
     return FileResponse(
