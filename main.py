@@ -26,7 +26,7 @@ from playwright.async_api import (
 
 app = FastAPI(
     title="Legal Master API",
-    version="1.6.0",
+    version="1.7.0",
     description="API për Hartues Aktesh Juridike - Kosovë / ARBK",
     servers=[
         {
@@ -177,7 +177,7 @@ def find_first(patterns, text):
 
 
 # =========================================================
-# WORD DOCUMENT GENERATION
+# WORD DOCUMENT
 # =========================================================
 
 def create_word_document(
@@ -200,9 +200,7 @@ def create_word_document(
 
     document.add_paragraph()
 
-    blocks = data.body.split("\n")
-
-    for block in blocks:
+    for block in data.body.split("\n"):
         text = block.strip()
 
         if not text:
@@ -225,144 +223,6 @@ def create_word_document(
 
 
 # =========================================================
-# ARBK INPUT FIELD DETECTION
-# =========================================================
-
-async def fill_arbk_nui(page, nui: str):
-    """
-    Gjen fushën publike të ARBK-së për:
-    'Numri unik identifikues ose numri i biznesit'
-    """
-
-    selectors = [
-        'input[placeholder*="Numri unik identifikues"]',
-        'input[placeholder*="numri unik identifikues"]',
-        'input[placeholder*="Numri unik"]',
-        'input[placeholder*="numri unik"]',
-        'input[placeholder*="numri i biznesit"]',
-        'input[aria-label*="Numri unik identifikues"]',
-        'input[aria-label*="numri i biznesit"]',
-    ]
-
-    for selector in selectors:
-        locator = page.locator(selector)
-
-        if await locator.count() > 0:
-            try:
-                field = locator.first
-
-                if await field.is_visible():
-                    await field.fill(nui)
-                    return True
-            except Exception:
-                pass
-
-    labels = page.locator("label")
-
-    for i in range(await labels.count()):
-        label = labels.nth(i)
-
-        try:
-            text = (
-                await label.inner_text()
-            ).lower()
-
-            if (
-                "numri unik identifikues" in text
-                or "numri i biznesit" in text
-            ):
-                target = await label.get_attribute("for")
-
-                if target:
-                    field = page.locator(f"#{target}")
-
-                    if (
-                        await field.count() > 0
-                        and await field.is_visible()
-                    ):
-                        await field.fill(nui)
-                        return True
-
-        except Exception:
-            continue
-
-    inputs = page.locator("input")
-
-    for i in range(await inputs.count()):
-        field = inputs.nth(i)
-
-        try:
-            if not await field.is_visible():
-                continue
-
-            placeholder = (
-                await field.get_attribute("placeholder") or ""
-            ).lower()
-
-            aria = (
-                await field.get_attribute("aria-label") or ""
-            ).lower()
-
-            name = (
-                await field.get_attribute("name") or ""
-            ).lower()
-
-            item_id = (
-                await field.get_attribute("id") or ""
-            ).lower()
-
-            combined = (
-                f"{placeholder} {aria} {name} {item_id}"
-            )
-
-            if (
-                "numri unik identifikues" in combined
-                or "numri i biznesit" in combined
-                or "nui" in combined
-            ):
-                await field.fill(nui)
-                return True
-
-        except Exception:
-            continue
-
-    return False
-
-
-# =========================================================
-# ARBK SEARCH BUTTON
-# =========================================================
-
-async def click_arbk_search(page):
-
-    candidates = [
-        page.get_by_role(
-            "button",
-            name=re.compile(
-                r"KËRKO|KERKO",
-                re.IGNORECASE,
-            ),
-        ),
-        page.locator('button:has-text("KËRKO")'),
-        page.locator('button:has-text("KERKO")'),
-        page.locator('input[type="submit"]'),
-    ]
-
-    for locator in candidates:
-        try:
-            if await locator.count() > 0:
-                button = locator.first
-
-                if await button.is_visible():
-                    await button.click()
-                    return True
-        except Exception:
-            continue
-
-    return False
-
-
-# =========================================================
 # ARBK DATA EXTRACTION
 # =========================================================
 
@@ -382,10 +242,7 @@ def extract_public_arbk_data(
 
     legal_form = find_first(
         [
-            (
-                r"(Shoqëri\s+me\s+përgjegjësi\s+"
-                r"të\s+kufizuar)"
-            ),
+            r"(Shoqëri\s+me\s+përgjegjësi\s+të\s+kufizuar)",
             r"\b(SH\.?P\.?K\.?)\b",
             r"(Shoqëri\s+Aksionare)",
             r"\b(SH\.?A\.?)\b",
@@ -400,11 +257,7 @@ def extract_public_arbk_data(
         re.IGNORECASE,
     )
 
-    email = (
-        email_match.group(0)
-        if email_match
-        else None
-    )
+    email = email_match.group(0) if email_match else None
 
     phone = find_first(
         [
@@ -419,8 +272,7 @@ def extract_public_arbk_data(
     registration_date = find_first(
         [
             (
-                r"(?:Themeluar|Regjistruar|"
-                r"Data e regjistrimit)\s*:?\s*"
+                r"(?:Themeluar|Regjistruar|Data e regjistrimit)\s*:?\s*"
                 r"(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{4})"
             )
         ],
@@ -437,30 +289,23 @@ def extract_public_arbk_data(
         text,
     )
 
-    business_name = None
-    municipality = None
-
     lines = [
         clean_text(line)
         for line in text.splitlines()
         if clean_text(line)
     ]
 
-    # -----------------------------------------------------
-    # FIND BUSINESS NAME AROUND NUI
-    # -----------------------------------------------------
+    business_name = None
+    municipality = None
 
     for index, line in enumerate(lines):
-
         if nui in line:
-
             nearby = lines[
                 max(0, index - 8):
-                min(len(lines), index + 10)
+                min(len(lines), index + 12)
             ]
 
             for candidate in nearby:
-
                 if not candidate:
                     continue
 
@@ -495,41 +340,15 @@ def extract_public_arbk_data(
             if business_name:
                 break
 
-    if not business_name:
-
-        for line in lines:
-
-            lower = line.lower()
-
-            if (
-                "sh.p.k" in lower
-                or "shpk" in lower
-                or "sh.a" in lower
-                or "biznes individual" in lower
-            ):
-                if len(line) <= 180:
-                    business_name = line
-                    break
-
-    # -----------------------------------------------------
-    # MUNICIPALITY BEST EFFORT
-    # -----------------------------------------------------
-
     for index, line in enumerate(lines):
-
         if nui in line:
-
             nearby = lines[
                 index:
-                min(len(lines), index + 10)
+                min(len(lines), index + 12)
             ]
 
             for candidate in nearby:
-
-                if not candidate:
-                    continue
-
-                if candidate == nui:
+                if not candidate or candidate == nui:
                     continue
 
                 lower = candidate.lower()
@@ -549,33 +368,23 @@ def extract_public_arbk_data(
             if municipality:
                 break
 
-    # -----------------------------------------------------
-    # OWNERS
-    # -----------------------------------------------------
-
     owners = []
+    directors = []
 
     owner_section = re.search(
-        (
-            r"PRONAR[ËE]T?(.*?)(?:"
-            r"P[ËE]RFAQ[ËE]SUES|BORDI|$)"
-        ),
+        r"PRONAR[ËE]T?(.*?)(?:P[ËE]RFAQ[ËE]SUES|BORDI|$)",
         text,
         re.IGNORECASE | re.DOTALL,
     )
 
     if owner_section:
-
-        owner_text = owner_section.group(1)
-
         owner_lines = [
             clean_text(x)
-            for x in owner_text.splitlines()
+            for x in owner_section.group(1).splitlines()
             if clean_text(x)
         ]
 
         for item in owner_lines[:10]:
-
             if (
                 len(item) >= 3
                 and not re.fullmatch(r"\d+", item)
@@ -587,33 +396,20 @@ def extract_public_arbk_data(
                     }
                 )
 
-    # -----------------------------------------------------
-    # REPRESENTATIVES / DIRECTORS
-    # -----------------------------------------------------
-
-    directors = []
-
     representative_section = re.search(
-        (
-            r"P[ËE]RFAQ[ËE]SUES(?:IT)?(.*?)(?:"
-            r"BORDI|PRONAR[ËE]T|$)"
-        ),
+        r"P[ËE]RFAQ[ËE]SUES(?:IT)?(.*?)(?:BORDI|PRONAR[ËE]T|$)",
         text,
         re.IGNORECASE | re.DOTALL,
     )
 
     if representative_section:
-
-        rep_text = representative_section.group(1)
-
         rep_lines = [
             clean_text(x)
-            for x in rep_text.splitlines()
+            for x in representative_section.group(1).splitlines()
             if clean_text(x)
         ]
 
         for item in rep_lines[:10]:
-
             if (
                 len(item) >= 3
                 and not re.fullmatch(r"\d+", item)
@@ -652,11 +448,10 @@ def extract_public_arbk_data(
     operation_id="root",
 )
 def root():
-
     return {
         "service": "Legal Master API",
         "status": "running",
-        "version": "1.6.0",
+        "version": "1.7.0",
     }
 
 
@@ -671,7 +466,6 @@ def root():
     dependencies=[Depends(verify_api_key)],
 )
 def health():
-
     return {
         "status": "ok",
         "service": "legal-master-api",
@@ -687,29 +481,16 @@ def health():
     operation_id="validate_business",
     dependencies=[Depends(verify_api_key)],
 )
-def validate_business(
-    data: BusinessRequest,
-):
-
+def validate_business(data: BusinessRequest):
     issues = []
 
     if not data.company_name.strip():
-        issues.append(
-            "Mungon emri i biznesit"
-        )
+        issues.append("Mungon emri i biznesit")
 
-    if (
-        data.capital is not None
-        and data.capital < 0
-    ):
-        issues.append(
-            "Kapitali nuk mund të jetë negativ"
-        )
+    if data.capital is not None and data.capital < 0:
+        issues.append("Kapitali nuk mund të jetë negativ")
 
-    if (
-        data.employees is not None
-        and data.employees < 0
-    ):
+    if data.employees is not None and data.employees < 0:
         issues.append(
             "Numri i punëtorëve nuk mund të jetë negativ"
         )
@@ -722,7 +503,7 @@ def validate_business(
 
 
 # =========================================================
-# ARBK DEBUG FORM
+# ARBK DEBUG
 # =========================================================
 
 @app.get(
@@ -733,11 +514,9 @@ def validate_business(
 async def debug_arbk_form():
 
     async with async_playwright() as playwright:
-
         browser = None
 
         try:
-
             browser = await playwright.chromium.launch(
                 headless=True,
                 args=[
@@ -746,12 +525,7 @@ async def debug_arbk_form():
                 ],
             )
 
-            page = await browser.new_page(
-                viewport={
-                    "width": 1440,
-                    "height": 1000,
-                }
-            )
+            page = await browser.new_page()
 
             await page.goto(
                 ARBK_SEARCH_URL,
@@ -761,179 +535,38 @@ async def debug_arbk_form():
 
             await page.wait_for_timeout(3000)
 
-            # -------------------------------------------------
-            # INPUTS
-            # -------------------------------------------------
-
-            inputs = []
-
-            input_locator = page.locator("input")
-
-            for i in range(await input_locator.count()):
-
-                field = input_locator.nth(i)
-
-                try:
-
-                    input_value = None
-
-                    try:
-                        input_value = await field.input_value()
-                    except Exception:
-                        pass
-
-                    inputs.append(
-                        {
-                            "index": i,
-                            "type": await field.get_attribute(
-                                "type"
-                            ),
-                            "id": await field.get_attribute(
-                                "id"
-                            ),
-                            "name": await field.get_attribute(
-                                "name"
-                            ),
-                            "placeholder": await field.get_attribute(
-                                "placeholder"
-                            ),
-                            "aria_label": await field.get_attribute(
-                                "aria-label"
-                            ),
-                            "value": input_value,
-                            "visible": await field.is_visible(),
-                            "outer_html": await field.evaluate(
-                                "(el) => el.outerHTML"
-                            ),
-                        }
-                    )
-
-                except Exception as exc:
-
-                    inputs.append(
-                        {
-                            "index": i,
-                            "error": str(exc),
-                        }
-                    )
-
-            # -------------------------------------------------
-            # BUTTONS
-            # -------------------------------------------------
-
-            buttons = []
-
-            button_locator = page.locator("button")
-
-            for i in range(await button_locator.count()):
-
-                button = button_locator.nth(i)
-
-                try:
-
-                    text = ""
-
-                    try:
-                        text = (
-                            await button.inner_text()
-                        ).strip()
-                    except Exception:
-                        pass
-
-                    buttons.append(
-                        {
-                            "index": i,
-                            "text": text,
-                            "id": await button.get_attribute(
-                                "id"
-                            ),
-                            "name": await button.get_attribute(
-                                "name"
-                            ),
-                            "type": await button.get_attribute(
-                                "type"
-                            ),
-                            "visible": await button.is_visible(),
-                            "outer_html": await button.evaluate(
-                                "(el) => el.outerHTML"
-                            ),
-                        }
-                    )
-
-                except Exception as exc:
-
-                    buttons.append(
-                        {
-                            "index": i,
-                            "error": str(exc),
-                        }
-                    )
-
-            # -------------------------------------------------
-            # SELECTS
-            # -------------------------------------------------
-
-            selects = []
-
-            select_locator = page.locator("select")
-
-            for i in range(await select_locator.count()):
-
-                select = select_locator.nth(i)
-
-                try:
-
-                    selects.append(
-                        {
-                            "index": i,
-                            "id": await select.get_attribute(
-                                "id"
-                            ),
-                            "name": await select.get_attribute(
-                                "name"
-                            ),
-                            "visible": await select.is_visible(),
-                            "outer_html": await select.evaluate(
-                                "(el) => el.outerHTML"
-                            ),
-                        }
-                    )
-
-                except Exception as exc:
-
-                    selects.append(
-                        {
-                            "index": i,
-                            "error": str(exc),
-                        }
-                    )
+            nui_field = page.locator("#bsf-NUI")
 
             return {
                 "url": page.url,
                 "title": await page.title(),
-                "inputs": inputs,
-                "buttons": buttons,
-                "selects": selects,
+                "nui_field_found": (
+                    await nui_field.count() > 0
+                ),
+                "nui_field_visible": (
+                    await nui_field.is_visible()
+                    if await nui_field.count() > 0
+                    else False
+                ),
+                "nui_placeholder": (
+                    await nui_field.get_attribute("placeholder")
+                    if await nui_field.count() > 0
+                    else None
+                ),
+                "search_button_count": await page.get_by_role(
+                    "button",
+                    name="KËRKO",
+                    exact=True,
+                ).count(),
             }
 
-        except Exception as exc:
-
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "Gabim gjatë diagnostikimit "
-                    f"të formularit ARBK: {str(exc)}"
-                ),
-            )
-
         finally:
-
             if browser:
                 await browser.close()
 
 
 # =========================================================
-# ARBK INDIVIDUAL PUBLIC LOOKUP
+# ARBK PUBLIC LOOKUP
 # =========================================================
 
 @app.get(
@@ -941,32 +574,20 @@ async def debug_arbk_form():
     operation_id="lookup_arbk_business",
     dependencies=[Depends(verify_api_key)],
 )
-async def lookup_arbk_business(
-    nui: str,
-):
+async def lookup_arbk_business(nui: str):
 
-    nui = re.sub(
-        r"\D",
-        "",
-        nui,
-    )
+    nui = re.sub(r"\D", "", nui)
 
     if not nui:
-
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Numri unik identifikues "
-                "nuk është valid"
-            ),
+            detail="Numri unik identifikues nuk është valid",
         )
 
     async with async_playwright() as playwright:
-
         browser = None
 
         try:
-
             browser = await playwright.chromium.launch(
                 headless=True,
                 args=[
@@ -978,7 +599,7 @@ async def lookup_arbk_business(
             page = await browser.new_page(
                 viewport={
                     "width": 1440,
-                    "height": 1000,
+                    "height": 1200,
                 }
             )
 
@@ -990,64 +611,111 @@ async def lookup_arbk_business(
 
             await page.wait_for_timeout(3000)
 
-            filled = await fill_arbk_nui(
-                page,
-                nui,
-            )
+            # =================================================
+            # EXACT NUI FIELD
+            # =================================================
 
-            if not filled:
+            nui_field = page.locator("#bsf-NUI")
 
+            if await nui_field.count() == 0:
                 raise HTTPException(
                     status_code=502,
                     detail=(
-                        "Nuk u identifikua fusha "
-                        "'Numri unik identifikues ose "
-                        "numri i biznesit' në ARBK."
+                        "Fusha #bsf-NUI nuk u gjet "
+                        "në faqen e ARBK-së."
                     ),
                 )
 
-            searched = await click_arbk_search(
-                page
-            )
-
-            if not searched:
-
+            if not await nui_field.is_visible():
                 raise HTTPException(
                     status_code=502,
                     detail=(
-                        "Nuk u identifikua butoni "
-                        "KËRKO në faqen e ARBK-së."
+                        "Fusha #bsf-NUI ekziston, "
+                        "por nuk është e dukshme."
                     ),
                 )
 
+            await nui_field.click()
+
+            await nui_field.fill("")
+
+            await nui_field.fill(nui)
+
+            # Verify that browser really contains the number
+            entered_value = await nui_field.input_value()
+
+            if entered_value != nui:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Numri nuk u vendos saktë "
+                        "në fushën #bsf-NUI."
+                    ),
+                )
+
+            # =================================================
+            # EXACT SEARCH BUTTON
+            # =================================================
+
+            search_button = page.get_by_role(
+                "button",
+                name="KËRKO",
+                exact=True,
+            )
+
+            if await search_button.count() == 0:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Butoni KËRKO nuk u gjet."
+                    ),
+                )
+
+            await search_button.click()
+
+            # Wait for page/search result
             try:
-
                 await page.wait_for_load_state(
                     "networkidle",
                     timeout=20000,
                 )
-
             except PlaywrightTimeoutError:
                 pass
 
-            await page.wait_for_timeout(5000)
+            # Wait until result section appears if possible
+            try:
+                await page.get_by_text(
+                    "Rezultatet e Bizneseve",
+                    exact=False,
+                ).wait_for(
+                    state="visible",
+                    timeout=15000,
+                )
+            except Exception:
+                pass
+
+            await page.wait_for_timeout(4000)
 
             body_text = await page.locator(
                 "body"
             ).inner_text()
 
-            if nui not in body_text:
+            # =================================================
+            # CHECK RESULT
+            # =================================================
 
+            if nui not in body_text:
                 return {
                     "found": False,
                     "nui": nui,
                     "source": ARBK_SEARCH_URL,
+                    "entered_value": entered_value,
                     "message": (
-                        "Nuk u gjet subjekt publik "
-                        "me këtë Numër Unik Identifikues "
-                        "në rezultatin e ARBK-së."
+                        "Kërkimi u ekzekutua në #bsf-NUI, "
+                        "por ky numër nuk u gjet në tekstin "
+                        "publik të rezultatit."
                     ),
-                    "raw_public_text": body_text[:12000],
+                    "raw_public_text": body_text[:15000],
                 }
 
             extracted = extract_public_arbk_data(
@@ -1057,14 +725,15 @@ async def lookup_arbk_business(
 
             return {
                 "found": True,
+                "nui": nui,
                 "source": ARBK_SEARCH_URL,
+                "entered_value": entered_value,
                 "data": extracted,
-                "raw_public_text": body_text[:12000],
+                "raw_public_text": body_text[:15000],
                 "note": (
-                    "Janë përdorur vetëm të dhënat "
-                    "që shfaqen publikisht për subjektin "
-                    "e kërkuar. Fushat që nuk janë "
-                    "identifikuar mbeten bosh/null."
+                    "Kërkimi është bërë direkt në fushën "
+                    "#bsf-NUI dhe me butonin zyrtar KËRKO. "
+                    "Janë përdorur vetëm të dhënat publike."
                 ),
             }
 
@@ -1072,7 +741,6 @@ async def lookup_arbk_business(
             raise
 
         except PlaywrightTimeoutError:
-
             raise HTTPException(
                 status_code=504,
                 detail=(
@@ -1082,18 +750,15 @@ async def lookup_arbk_business(
             )
 
         except Exception as exc:
-
             raise HTTPException(
                 status_code=502,
                 detail=(
-                    "Gabim gjatë leximit "
-                    "të faqes publike të ARBK-së: "
+                    "Gabim gjatë kërkimit publik në ARBK: "
                     f"{str(exc)}"
                 ),
             )
 
         finally:
-
             if browser:
                 await browser.close()
 
@@ -1107,51 +772,42 @@ async def lookup_arbk_business(
     operation_id="verify_arbk_business",
     dependencies=[Depends(verify_api_key)],
 )
-def verify_arbk_business(
-    data: ARBKBusinessData,
-):
+def verify_arbk_business(data: ARBKBusinessData):
 
     critical_issues = []
     warnings = []
 
     if not data.business_name.strip():
-
         critical_issues.append(
             "Mungon emri i saktë i biznesit"
         )
 
     if not data.nui.strip():
-
         critical_issues.append(
             "Mungon NUI"
         )
 
     if data.business_status is None:
-
         warnings.append(
             "Statusi i biznesit nuk është dhënë"
         )
 
     if data.address is None:
-
         warnings.append(
             "Adresa e biznesit nuk është dhënë"
         )
 
     if data.legal_form is None:
-
         warnings.append(
             "Forma juridike nuk është dhënë"
         )
 
     if not data.directors:
-
         warnings.append(
             "Nuk është dhënë drejtori/përfaqësuesi"
         )
 
     if not data.owners:
-
         warnings.append(
             "Nuk janë dhënë pronarët/anëtarët"
         )
@@ -1173,39 +829,30 @@ def verify_arbk_business(
     operation_id="generate_document",
     dependencies=[Depends(verify_api_key)],
 )
-def generate_document(
-    data: DocumentRequest,
-):
+def generate_document(data: DocumentRequest):
 
     if not data.title.strip():
-
         raise HTTPException(
             status_code=400,
             detail="Titulli i dokumentit mungon",
         )
 
     if not data.body.strip():
-
         raise HTTPException(
             status_code=400,
             detail="Përmbajtja e dokumentit mungon",
         )
 
     if data.filename:
-
         base_filename = clean_filename(
             data.filename
         )
-
     else:
-
         base_filename = clean_filename(
             f"{data.document_type}_{uuid4().hex[:8]}"
         )
 
-    filename = (
-        f"{base_filename}.docx"
-    )
+    filename = f"{base_filename}.docx"
 
     internal_name = (
         f"{uuid4().hex}_{filename}"
@@ -1220,13 +867,9 @@ def generate_document(
         output_path=output_path,
     )
 
-    download_token = (
-        secrets.token_urlsafe(32)
-    )
+    download_token = secrets.token_urlsafe(32)
 
-    DOWNLOAD_TOKENS[
-        download_token
-    ] = {
+    DOWNLOAD_TOKENS[download_token] = {
         "path": str(output_path),
         "filename": filename,
     }
@@ -1252,16 +895,11 @@ def generate_document(
     "/files/{token}",
     operation_id="download_document",
 )
-def download_document(
-    token: str,
-):
+def download_document(token: str):
 
-    file_data = (
-        DOWNLOAD_TOKENS.get(token)
-    )
+    file_data = DOWNLOAD_TOKENS.get(token)
 
     if not file_data:
-
         raise HTTPException(
             status_code=404,
             detail=(
@@ -1275,7 +913,6 @@ def download_document(
     )
 
     if not file_path.exists():
-
         raise HTTPException(
             status_code=404,
             detail=(
