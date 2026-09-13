@@ -5,7 +5,10 @@ from typing import Optional
 app = FastAPI(
     title="Legal Master API",
     version="1.0.0",
-    description="API për Hartues Aktesh Juridike - Kosovë / ARBK"
+    description="API për Hartues Aktesh Juridike - Kosovë / ARBK",
+    servers=[
+        {"url": "https://legal-master-api.onrender.com"}
+    ]
 )
 
 class HealthResponse(BaseModel):
