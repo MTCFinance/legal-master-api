@@ -1,4 +1,6 @@
-fastapi
+ fastapi
 uvicorn[standard]
 pydantic
 python-multipart
+python-docx
+reportlab
