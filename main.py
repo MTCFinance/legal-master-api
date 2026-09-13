@@ -7,13 +7,17 @@ app = FastAPI(
     version="1.0.0",
     description="API për Hartues Aktesh Juridike - Kosovë / ARBK",
     servers=[
-        {"url": "https://legal-master-api.onrender.com"}
+        {
+            "url": "https://legal-master-api.onrender.com",
+            "description": "Production server"
+        }
     ]
 )
 
 class HealthResponse(BaseModel):
     status: str
     service: str
+
 
 class BusinessRequest(BaseModel):
     company_name: str
@@ -22,21 +26,31 @@ class BusinessRequest(BaseModel):
     capital: Optional[float] = None
     employees: Optional[int] = None
 
-@app.get("/")
+
+@app.get("/", operation_id="root")
 def root():
     return {
         "service": "Legal Master API",
         "status": "running"
     }
 
-@app.get("/health", response_model=HealthResponse)
+
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+    operation_id="health"
+)
 def health():
     return {
         "status": "ok",
         "service": "legal-master-api"
     }
 
-@app.post("/business/validate")
+
+@app.post(
+    "/business/validate",
+    operation_id="validate_business"
+)
 def validate_business(data: BusinessRequest):
     issues = []
 
@@ -45,6 +59,9 @@ def validate_business(data: BusinessRequest):
 
     if data.capital is not None and data.capital < 0:
         issues.append("Kapitali nuk mund të jetë negativ")
+
+    if data.employees is not None and data.employees < 0:
+        issues.append("Numri i punëtorëve nuk mund të jetë negativ")
 
     return {
         "valid": len(issues) == 0,
