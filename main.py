@@ -1,10 +1,15 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
+import os
+import secrets
 from typing import Optional
+
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import APIKeyHeader
+from pydantic import BaseModel
+
 
 app = FastAPI(
     title="Legal Master API",
-    version="1.0.0",
+    version="1.1.0",
     description="API për Hartues Aktesh Juridike - Kosovë / ARBK",
     servers=[
         {
@@ -13,6 +18,44 @@ app = FastAPI(
         }
     ]
 )
+
+
+# =========================================================
+# API KEY SECURITY
+# =========================================================
+
+api_key_header = APIKeyHeader(
+    name="X-API-Key",
+    auto_error=False
+)
+
+
+def verify_api_key(
+    api_key: Optional[str] = Depends(api_key_header)
+):
+    expected_key = os.getenv("LEGAL_MASTER_API_KEY")
+
+    if not expected_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="API key is not configured on the server"
+        )
+
+    if api_key is None or not secrets.compare_digest(
+        api_key,
+        expected_key
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key"
+        )
+
+    return True
+
+
+# =========================================================
+# MODELS
+# =========================================================
 
 class HealthResponse(BaseModel):
     status: str
@@ -27,7 +70,14 @@ class BusinessRequest(BaseModel):
     employees: Optional[int] = None
 
 
-@app.get("/", operation_id="root")
+# =========================================================
+# PUBLIC ROOT
+# =========================================================
+
+@app.get(
+    "/",
+    operation_id="root"
+)
 def root():
     return {
         "service": "Legal Master API",
@@ -35,10 +85,15 @@ def root():
     }
 
 
+# =========================================================
+# PROTECTED HEALTH CHECK
+# =========================================================
+
 @app.get(
     "/health",
     response_model=HealthResponse,
-    operation_id="health"
+    operation_id="health",
+    dependencies=[Depends(verify_api_key)]
 )
 def health():
     return {
@@ -47,9 +102,14 @@ def health():
     }
 
 
+# =========================================================
+# BUSINESS VALIDATION
+# =========================================================
+
 @app.post(
     "/business/validate",
-    operation_id="validate_business"
+    operation_id="validate_business",
+    dependencies=[Depends(verify_api_key)]
 )
 def validate_business(data: BusinessRequest):
     issues = []
@@ -61,7 +121,9 @@ def validate_business(data: BusinessRequest):
         issues.append("Kapitali nuk mund të jetë negativ")
 
     if data.employees is not None and data.employees < 0:
-        issues.append("Numri i punëtorëve nuk mund të jetë negativ")
+        issues.append(
+            "Numri i punëtorëve nuk mund të jetë negativ"
+        )
 
     return {
         "valid": len(issues) == 0,
