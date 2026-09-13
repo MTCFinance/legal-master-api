@@ -2,13 +2,13 @@ import os
 import re
 import secrets
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 from uuid import uuid4
 
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt
@@ -16,7 +16,7 @@ from docx.shared import Pt
 
 app = FastAPI(
     title="Legal Master API",
-    version="1.2.0",
+    version="1.3.0",
     description="API për Hartues Aktesh Juridike - Kosovë / ARBK",
     servers=[
         {
@@ -94,6 +94,36 @@ class DocumentRequest(BaseModel):
     filename: Optional[str] = None
 
 
+class ARBKPerson(BaseModel):
+    full_name: str
+    role: Optional[str] = None
+
+
+class ARBKBusinessData(BaseModel):
+    business_name: str
+    trade_name: Optional[str] = None
+    nui: str
+
+    legal_form: Optional[str] = None
+    business_status: Optional[str] = None
+    registration_date: Optional[str] = None
+
+    address: Optional[str] = None
+    municipality: Optional[str] = None
+
+    primary_activity: Optional[str] = None
+    other_activities: List[str] = Field(default_factory=list)
+
+    owners: List[ARBKPerson] = Field(default_factory=list)
+    directors: List[ARBKPerson] = Field(default_factory=list)
+
+    email: Optional[str] = None
+    phone: Optional[str] = None
+
+    source_url: Optional[str] = None
+    verification_date: Optional[str] = None
+
+
 # =========================================================
 # HELPERS
 # =========================================================
@@ -108,7 +138,10 @@ def clean_filename(name: str) -> str:
     return name[:100]
 
 
-def create_word_document(data: DocumentRequest, output_path: Path):
+def create_word_document(
+    data: DocumentRequest,
+    output_path: Path
+):
     document = Document()
 
     normal_style = document.styles["Normal"]
@@ -161,7 +194,7 @@ def root():
     return {
         "service": "Legal Master API",
         "status": "running",
-        "version": "1.2.0"
+        "version": "1.3.0"
     }
 
 
@@ -209,6 +242,108 @@ def validate_business(data: BusinessRequest):
         "valid": len(issues) == 0,
         "issues": issues,
         "data": data
+    }
+
+
+# =========================================================
+# ARBK PUBLIC DATA VERIFICATION
+# =========================================================
+
+@app.post(
+    "/arbk/verify-business",
+    operation_id="verify_arbk_business",
+    dependencies=[Depends(verify_api_key)]
+)
+def verify_arbk_business(data: ARBKBusinessData):
+
+    critical_issues = []
+    warnings = []
+
+    if not data.business_name.strip():
+        critical_issues.append(
+            "Mungon emri i saktë i biznesit"
+        )
+
+    if not data.nui.strip():
+        critical_issues.append(
+            "Mungon NUI"
+        )
+
+    if data.business_status is None:
+        warnings.append(
+            "Statusi i biznesit nuk është dhënë"
+        )
+
+    if data.address is None:
+        warnings.append(
+            "Adresa e biznesit nuk është dhënë"
+        )
+
+    if data.legal_form is None:
+        warnings.append(
+            "Forma juridike nuk është dhënë"
+        )
+
+    if not data.directors:
+        warnings.append(
+            "Nuk është dhënë drejtori/përfaqësuesi"
+        )
+
+    if not data.owners:
+        warnings.append(
+            "Nuk janë dhënë pronarët/anëtarët"
+        )
+
+    if data.email is None:
+        warnings.append(
+            "Emaili nuk është publik ose nuk është dhënë"
+        )
+
+    if data.phone is None:
+        warnings.append(
+            "Telefoni nuk është publik ose nuk është dhënë"
+        )
+
+    normalized = {
+        "business_name": data.business_name.strip(),
+        "trade_name": data.trade_name,
+        "nui": data.nui.strip(),
+        "legal_form": data.legal_form,
+        "business_status": data.business_status,
+        "registration_date": data.registration_date,
+        "address": data.address,
+        "municipality": data.municipality,
+        "primary_activity": data.primary_activity,
+        "other_activities": data.other_activities,
+        "owners": [
+            person.model_dump()
+            for person in data.owners
+        ],
+        "directors": [
+            person.model_dump()
+            for person in data.directors
+        ],
+        "email": data.email,
+        "phone": data.phone,
+        "source_url": data.source_url,
+        "verification_date": data.verification_date
+    }
+
+    return {
+        "valid": len(critical_issues) == 0,
+        "status": (
+            "VERIFIED_DATA"
+            if len(critical_issues) == 0
+            else "INCOMPLETE_DATA"
+        ),
+        "critical_issues": critical_issues,
+        "warnings": warnings,
+        "business": normalized,
+        "note": (
+            "Përdoren vetëm të dhënat publike të dhëna "
+            "nga burimi ARBK. Të dhënat që nuk publikohen "
+            "nuk duhet të supozohen ose shpiken."
+        )
     }
 
 
